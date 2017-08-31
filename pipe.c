@@ -8,16 +8,71 @@
 #include "sleeplock.h"
 #include "file.h"
 
-#define PIPESIZE 512
+#define PIPESIZE 2048
 
 struct pipe {
-  struct spinlock lock;
   char data[PIPESIZE];
+  struct spinlock lock;
   uint nread;     // number of bytes read
   uint nwrite;    // number of bytes written
   int readopen;   // read fd is still open
   int writeopen;  // write fd is still open
 };
+
+
+// memcpy borrowed from open source apple https://opensource.apple.com/source/xnu/xnu-2050.18.24/libsyscall/wrappers/memcpy.c
+typedef int word;
+#define wsize sizeof(word)
+#define wmask (wsize - 1)
+
+void*
+mymemcpy(void *dst0, const void *src0, uint length)
+{
+  char *dst = dst0;
+  const char *src = src0;
+  uint t;
+
+  if (length == 0 || dst == src)
+    goto done;
+
+#define TLOOP(s) if (t) TLOOP1(s)
+#define TLOOP1(s) do { s; } while (--t)
+
+  if ((unsigned long)dst < (unsigned long)src) {
+    // copy forward
+    t = (uint)src;
+    if ((t | (uint)dst) & wmask) {
+      if ((t ^ (uint)dst) & wmask || length < wsize)
+        t = length;
+      else
+        t = wsize - (t & wmask);
+      length -= t;
+      TLOOP1(*dst++ = *src++);
+    }
+    t = length / wsize;
+    TLOOP(*(word *)dst = *(word *)src; src += wsize; dst += wsize);
+    t = length & wmask;
+    TLOOP(*dst++ = *src++);
+  } else {
+    src += length;
+    dst += length;
+    t = (uint)src;
+    if ((t | (uint)dst) & wmask) {
+      if ((t ^ (uint)dst) & wmask || length <= wsize)
+        t = length;
+      else
+        t &= wmask;
+      length -= t;
+      TLOOP1(*--dst = *--src);
+    }
+    t = length / wsize;
+    TLOOP(src -= wsize; dst -= wsize; *(word *)dst = *(word *)src);
+    t = length & wmask;
+    TLOOP(*--dst = *--src);
+  }
+done:
+  return (dst0);
+}
 
 int
 pipealloc(struct file **f0, struct file **f1)
@@ -78,20 +133,32 @@ pipeclose(struct pipe *p, int writable)
 int
 pipewrite(struct pipe *p, char *addr, int n)
 {
-  int i;
-
   acquire(&p->lock);
-  for(i = 0; i < n; i++){
-    while(p->nwrite == p->nread + PIPESIZE){  //DOC: pipewrite-full
-      if(p->readopen == 0 || myproc()->killed){
-        release(&p->lock);
-        return -1;
-      }
-      wakeup(&p->nread);
-      sleep(&p->nwrite, &p->lock);  //DOC: pipewrite-sleep
+  while(p->nwrite == p->nread + PIPESIZE){  //DOC: pipewrite-full
+    if(p->readopen == 0 || myproc()->killed){
+      release(&p->lock);
+      return -1;
     }
-    p->data[p->nwrite++ % PIPESIZE] = addr[i];
+    wakeup(&p->nread);
+    sleep(&p->nwrite, &p->lock);  //DOC: pipewrite-sleep
   }
+  // handle short writes
+  int sizeAvailable = (p->nread + PIPESIZE) - p->nwrite;
+  if(n > sizeAvailable) {
+    n = sizeAvailable;
+  }
+  int sizeToWrite = PIPESIZE - (p->nwrite % PIPESIZE);
+  if (n < sizeToWrite) {
+    sizeToWrite = n;
+  }
+  mymemcpy(&p->data[p->nwrite % PIPESIZE], addr, sizeToWrite);
+  p->nwrite = p->nwrite + sizeToWrite;
+  if (n > sizeToWrite) {
+    addr = addr + sizeToWrite;
+    sizeToWrite = n - sizeToWrite;
+    mymemcpy(&p->data[p->nwrite % PIPESIZE], addr, sizeToWrite);
+    p->nwrite = p->nwrite + sizeToWrite;
+  } 
   wakeup(&p->nread);  //DOC: pipewrite-wakeup1
   release(&p->lock);
   return n;
@@ -100,8 +167,6 @@ pipewrite(struct pipe *p, char *addr, int n)
 int
 piperead(struct pipe *p, char *addr, int n)
 {
-  int i;
-
   acquire(&p->lock);
   while(p->nread == p->nwrite && p->writeopen){  //DOC: pipe-empty
     if(myproc()->killed){
@@ -110,12 +175,23 @@ piperead(struct pipe *p, char *addr, int n)
     }
     sleep(&p->nread, &p->lock); //DOC: piperead-sleep
   }
-  for(i = 0; i < n; i++){  //DOC: piperead-copy
-    if(p->nread == p->nwrite)
-      break;
-    addr[i] = p->data[p->nread++ % PIPESIZE];
+  int sizeAvailable = p->nwrite - p->nread;
+  if(n > sizeAvailable) {
+    n = sizeAvailable;
+  }
+  int sizeToWrite = PIPESIZE - (p->nread % PIPESIZE);
+  if (n < sizeToWrite) {
+    sizeToWrite = n;
+  }
+  mymemcpy(addr, &p->data[p->nread % PIPESIZE], sizeToWrite);
+  p->nread = p->nread + sizeToWrite;
+  if (n > sizeToWrite) {
+    addr = addr + sizeToWrite;
+    sizeToWrite = n - sizeToWrite;
+    mymemcpy(addr, &p->data[p->nread % PIPESIZE], sizeToWrite);
+    p->nread = p->nread + sizeToWrite;
   }
   wakeup(&p->nwrite);  //DOC: piperead-wakeup
   release(&p->lock);
-  return i;
+  return n;
 }
