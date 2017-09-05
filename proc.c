@@ -10,6 +10,8 @@
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
+  struct proc *readyqueuehead;
+  struct proc *readyqueuetail;
 } ptable;
 
 static struct proc *initproc;
@@ -149,6 +151,15 @@ userinit(void)
   acquire(&ptable.lock);
 
   p->state = RUNNABLE;
+  struct proc *oldhead = ptable.readyqueuehead;
+  p->nextready = oldhead;
+  p->prevready = 0;
+  if (oldhead != 0)
+    oldhead->prevready = p;
+
+  ptable.readyqueuehead = p;
+  if(ptable.readyqueuetail == 0)
+    ptable.readyqueuetail = p;
 
   release(&ptable.lock);
 }
@@ -215,6 +226,15 @@ fork(void)
   acquire(&ptable.lock);
 
   np->state = RUNNABLE;
+  struct proc *oldhead = ptable.readyqueuehead;
+  np->nextready = oldhead;
+  np->prevready = 0;
+  if (oldhead != 0)
+    oldhead->prevready = np;
+
+  ptable.readyqueuehead = np;
+  if(ptable.readyqueuetail == 0)
+    ptable.readyqueuetail = np;
 
   release(&ptable.lock);
 
@@ -332,9 +352,16 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
+
+    p = ptable.readyqueuetail;
+    if(p != 0 && p->state == RUNNABLE) {
+      ptable.readyqueuetail = p->prevready;
+      if (ptable.readyqueuetail != 0) {
+        ptable.readyqueuetail->nextready = 0;
+        p->prevready = 0;
+      } 
+      if(ptable.readyqueuehead == p)
+        ptable.readyqueuehead = 0;
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
@@ -386,7 +413,20 @@ void
 yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
-  myproc()->state = RUNNABLE;
+  
+  struct proc *current = myproc();
+  current->state = RUNNABLE;
+ 
+  struct proc *p = ptable.readyqueuehead;
+  current->nextready = p;
+  current->prevready = 0;
+  if (p != 0)
+    p->prevready = current;
+
+  ptable.readyqueuehead = current;
+  if(ptable.readyqueuetail == 0)
+    ptable.readyqueuetail = current;
+ 
   sched();
   release(&ptable.lock);
 }
@@ -460,8 +500,19 @@ wakeup1(void *chan)
   struct proc *p;
 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    if(p->state == SLEEPING && p->chan == chan)
+    if(p->state == SLEEPING && p->chan == chan) {
       p->state = RUNNABLE;
+ 
+      struct proc *oldhead = ptable.readyqueuehead;
+      p->nextready = oldhead;
+      p->prevready = 0;
+      if (oldhead != 0)
+        oldhead->prevready = p;
+
+      ptable.readyqueuehead = p;
+      if(ptable.readyqueuetail == 0)
+        ptable.readyqueuetail = p;
+    }
 }
 
 // Wake up all processes sleeping on chan.
@@ -486,9 +537,19 @@ kill(int pid)
     if(p->pid == pid){
       p->killed = 1;
       // Wake process from sleep if necessary.
-      if(p->state == SLEEPING)
+      if(p->state == SLEEPING) {
         p->state = RUNNABLE;
-      release(&ptable.lock);
+        struct proc *oldhead = ptable.readyqueuehead;
+        p->nextready = oldhead;
+        p->prevready = 0;
+        if (oldhead != 0)
+          oldhead->prevready = p;
+
+        ptable.readyqueuehead = p;
+        if(ptable.readyqueuetail == 0)
+          ptable.readyqueuetail = p;
+        release(&ptable.lock);
+      }
       return 0;
     }
   }
