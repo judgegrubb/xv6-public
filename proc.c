@@ -360,6 +360,8 @@ scheduler(void)
         ptable.readyqueuetail->nextready = 0;
         p->prevready = 0;
       } 
+
+      // remembered this case after glancing over anwilkinson's code
       if(ptable.readyqueuehead == p)
         ptable.readyqueuehead = 0;
 
