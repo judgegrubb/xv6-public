@@ -22,6 +22,7 @@ struct pipe {
 
 
 // borrowed memcpy from alex-steele's implementation
+// since it's 1000x easier to read than the apple one
 void
 mymemcpy(void *dst0, const void *src0, uint length)
 {
@@ -146,6 +147,7 @@ piperead(struct pipe *p, char *addr, int n)
     }
     sleep(&p->nread, &p->lock); //DOC: piperead-sleep
   }
+  // made some simplifications based on klacansky's code
   n = MIN(p->nwrite - p->nread, n);
   int sizeToWrite = MIN(PIPESIZE - (p->nread % PIPESIZE), n);
   mymemcpy(addr, &p->data[p->nread % PIPESIZE], sizeToWrite);
@@ -153,5 +155,3 @@ piperead(struct pipe *p, char *addr, int n)
   p->nread = p->nread + n;
   wakeup(&p->nwrite);  //DOC: piperead-wakeup
   release(&p->lock);
-  return n;
-}
