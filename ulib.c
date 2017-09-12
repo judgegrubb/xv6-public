@@ -103,3 +103,13 @@ memmove(void *vdst, void *vsrc, int n)
     *dst++ = *src++;
   return vdst;
 }
+
+// helped by examining code from alanphumphrey and klacansky
+
+int
+fake_main(int argc, char **argv)
+{
+  int main(int, char**);
+  main(argc, argv);
+  exit();
+}
